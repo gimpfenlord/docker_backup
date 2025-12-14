@@ -10,7 +10,7 @@ from email.mime.multipart import MIMEMultipart
 
 # --- CONFIGURATION ---
 # List of stacks located in BASE_DIR
-STACKS = ["beszel", "dockmon", "immich", "newt", "npmplus", "patchmon", "tft-api"]
+STACKS = ["stack1", "stack2", "stack3", "stack4", "stack5"]
 
 # Main data paths
 BASE_DIR = "/opt/stacks"
