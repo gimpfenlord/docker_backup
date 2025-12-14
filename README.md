@@ -1,4 +1,4 @@
-# 🐳 Docker Stacks Backup Script (Python, Zstandard)
+# 🐳 Docker Stacks Backup Script
 
 This is a robust Python script designed to automate the backup, compression (using Zstandard), and retention management of multiple Docker Compose stacks. It ensures data consistency by stopping services before backup and restarting them immediately afterwards.
 
