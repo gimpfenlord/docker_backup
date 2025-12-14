@@ -3,13 +3,16 @@ import subprocess
 import os
 import sys
 from datetime import datetime
-from smtplib import SMTP_SSL
+import smtplib
 from email.message import EmailMessage
 
 # --- CONFIGURATION (User-configurable parameters) ---
 STACKS = ["stack1", "stack2", "stack3", "stack4", "stack5"] 
+
+# Directory settings
 BASE_DIR = "/opt/stacks"
 EXTRA_STACK_PATH = "/opt/dockge" 
+
 BACKUP_DIR = "/var/backups/docker"
 DAILY_RETENTION_DAYS = 28
 
@@ -20,6 +23,7 @@ SMTP_USER = 'YOUR_API_KEY'
 SMTP_PASS = 'YOUR_API_SECRET'
 SENDER_EMAIL = 'sender@your-domain.com'
 RECEIVER_EMAIL = 'recipient@email.com'
+
 SUBJECT_TAG = "[DOCKER-BACKUP]"
 
 # Log file path
@@ -28,7 +32,8 @@ LOG_FILE = "/var/log/docker-backup.log"
 # --- GLOBAL VARIABLES ---
 LOG_MESSAGES = []
 BACKUP_SUCCESSFUL = True
-NEW_ARCHIVES = []
+NEW_ARCHIVES = [] # List of tuples: [(full_path, size_human_readable, size_bytes), ...]
+DELETED_FILES = [] # List of filenames deleted by retention
 
 # --- HELPER FUNCTIONS ---
 
@@ -75,7 +80,7 @@ def compose_action(stack_path, action="down"):
     return result is not None
 
 def create_archive(stack_name, base_dir, stack_path):
-    """Creates an UNCOMPRESSED TAR archive."""
+    """Creates an UNCOMPRESSED TAR archive inside a dedicated stack folder."""
     global NEW_ARCHIVES
     
     TARGET_EXT = "tar"
@@ -90,7 +95,10 @@ def create_archive(stack_name, base_dir, stack_path):
         archive_name = stack_name
         archive_root_dir = base_dir
 
-    target_filename = os.path.join(BACKUP_DIR, f"{archive_name}_{timestamp}.{TARGET_EXT}")
+    final_backup_path = os.path.join(BACKUP_DIR, archive_name)
+    os.makedirs(final_backup_path, exist_ok=True)
+    
+    target_filename = os.path.join(final_backup_path, f"{archive_name}_{timestamp}.{TARGET_EXT}")
     
     log(f"Creating uncompressed archive for '{archive_name}' at {target_filename}...")
     
@@ -109,12 +117,23 @@ def create_archive(stack_name, base_dir, stack_path):
         result = run_command(command_list, f"Archiving {archive_name}")
     
     if result is not None:
-        NEW_ARCHIVES.append(os.path.basename(target_filename))
+        # Get file size in human-readable format and in bytes
+        size_bytes = 0
+        try:
+            size_human = subprocess.check_output(['du', '-h', target_filename]).decode('utf-8').split()[0]
+            size_bytes = os.path.getsize(target_filename)
+        except Exception:
+            size_human = "N/A"
+
+        # Store the full path and both size formats
+        relative_path = os.path.relpath(target_filename, "/") 
+        NEW_ARCHIVES.append(('/' + relative_path, size_human, size_bytes))
     return result is not None
 
 
 def cleanup_local_backups():
     """Deletes old local archives based on retention days."""
+    global DELETED_FILES
     TARGET_EXT = "tar"
     
     log(f"Starting local backup cleanup: deleting files older than {DAILY_RETENTION_DAYS} days.")
@@ -136,6 +155,9 @@ def cleanup_local_backups():
             if file_path:
                 try:
                     os.remove(file_path)
+                    # Store full path for retention summary
+                    relative_path = os.path.relpath(file_path, "/")
+                    DELETED_FILES.append('/' + relative_path)
                     log(f"Deleted old backup: {file_path}")
                     deleted_count += 1
                 except OSError as e:
@@ -171,6 +193,21 @@ def get_disk_usage():
         log(f"Error getting disk usage: {e}", "ERROR")
         return None
 
+def format_bytes(size_bytes):
+    """Converts bytes to human-readable format (like du -h)."""
+    if size_bytes == 0:
+        return "0B"
+    size_name = ("B", "K", "M", "G", "T", "P", "E", "Z", "Y")
+    i = 0
+    while size_bytes >= 1024 and i < len(size_name) - 1:
+        size_bytes /= 1024.
+        i += 1
+    # Format to match the du -h style (e.g., 4.0K, 9.2G, 40M)
+    if i == 0:
+        return f"{int(size_bytes)}{size_name[i]}"
+    return f"{size_bytes:.1f}{size_name[i]}"
+
+
 def send_email_notification(disk_info):
     """Sends a summary email notification."""
     
@@ -184,32 +221,96 @@ def send_email_notification(disk_info):
     current_date = datetime.now().strftime('%Y-%m-%d')
     subject = f"{SUBJECT_TAG} {status}: Docker Backup completed on {hostname} ({current_date})"
     
-    archive_list = "\n".join([f"- {a}" for a in NEW_ARCHIVES]) if NEW_ARCHIVES else "- No new archives created."
+    # --- 1. NEW ARCHIVES TABLE (Compact format with Total Size) ---
+    
+    NEW_ARCHIVES.sort(key=lambda x: x[0])
+    
+    FILE_WIDTH = 50 
+    SIZE_WIDTH = 8
+    SEPARATOR = "-" * (FILE_WIDTH + SIZE_WIDTH + 6)
+    
+    total_size_bytes = sum(item[2] for item in NEW_ARCHIVES)
+    total_size_human = format_bytes(total_size_bytes)
 
-    disk_body = ""
-    if disk_info:
-        disk_body = f"""
-        --- Disk Usage ({disk_info['mount']}) ---
-        Total: {disk_info['total']}
-        Used: {disk_info['used']} ({disk_info['percent']})
-        Free: {disk_info['free']}
-        """
+    if NEW_ARCHIVES:
+        archive_rows = "\n".join([
+            f"{size_human:>{SIZE_WIDTH}}    {name:<{FILE_WIDTH}}" 
+            for name, size_human, size_bytes in NEW_ARCHIVES
+        ])
+        
+        # Total line format
+        total_line = f"{total_size_human:>{SIZE_WIDTH}}    {'TOTAL SIZE OF NEW ARCHIVES':<{FILE_WIDTH}}"
+
+        archive_table = (
+            "SUMMARY OF CREATED ARCHIVES (Alphabetical by filename):\n"
+            f"{SEPARATOR}\n"
+            f"{'SIZE':<{SIZE_WIDTH}}    {'FILENAME':<{FILE_WIDTH}}\n"
+            f"{SEPARATOR}\n"
+            f"{archive_rows}\n"
+            f"{SEPARATOR}\n"
+            f"{total_line}\n"  # New Total Line
+            f"{SEPARATOR}\n"
+        )
     else:
-        disk_body = "Disk usage information not available."
+        archive_table = "SUMMARY OF CREATED ARCHIVES (Alphabetical by filename):\n- No new archives created.\n"
 
+    # --- 2. DISK USAGE CHECK (Compact format) ---
+    disk_summary = ""
+    if disk_info:
+        # Custom formatting to match the example: Disk: / | Total: 1008G | Used: 196G | Usage: 21%
+        mount_label = disk_info['mount'].split('/')[-1] if disk_info['mount'] != '/' else '/'
+        disk_line = (
+            f"Disk: {mount_label} | "
+            f"Total: {disk_info['total']} | "
+            f"Used: {disk_info['used']} | "
+            f"Usage: {disk_info['percent']}"
+        )
+        disk_summary = (
+            f"DISK USAGE CHECK (on {disk_info['mount']}):\n"
+            f"{SEPARATOR}\n"
+            f"{disk_line}\n"
+            f"{SEPARATOR}\n"
+        )
+    else:
+        disk_summary = "DISK USAGE CHECK:\n- Disk usage information not available.\n"
+
+    # --- 3. RETENTION TABLE (New Compact Format) ---
+    retention_table = (
+        f"RETENTION CLEANUP (Older than {DAILY_RETENTION_DAYS} days):\n"
+        f"{SEPARATOR}\n"
+    )
+    
+    # Determine the width needed for the retention list filename column
+    RETENTION_WIDTH = FILE_WIDTH + SIZE_WIDTH + 5
+    
+    if DELETED_FILES:
+        DELETED_FILES.sort()
+        
+        retention_rows = "\n".join([
+            f"{name:<{RETENTION_WIDTH}}" 
+            for name in DELETED_FILES
+        ])
+        retention_table += (
+            f"{'DELETED FILENAME':<{RETENTION_WIDTH}}\n"
+            f"{SEPARATOR}\n"
+            f"{retention_rows}\n"
+            f"{SEPARATOR}\n"
+        )
+    else:
+        retention_table += f"No files older than {DAILY_RETENTION_DAYS} days were deleted.\n{SEPARATOR}\n"
+    
+    
     log_body = "\n".join(LOG_MESSAGES)
     
     email_content = f"""
     Docker Stacks Backup Script Report ({status})
-
-    --- New Archives (Uncompressed .tar) ---
-    {archive_list}
     
-    --- Retention Policy ---
-    Files older than {DAILY_RETENTION_DAYS} days were deleted.
+    {archive_table}
 
-    {disk_body}
+    {disk_summary}
 
+    {retention_table}
+    
     --- Full Log ---
     {log_body}
     """
@@ -222,9 +323,12 @@ def send_email_notification(disk_info):
     
     try:
         log("Sending email notification...")
-        with SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
+            
         log("Email sent successfully.", "INFO")
     except Exception as e:
         log(f"Failed to send email: {e}", "ERROR")
