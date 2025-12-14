@@ -1,31 +1,51 @@
-# 🐳 Docker Stacks Backup Script
+# Docker Stack Backup Script
 
-This is a robust Python script designed to automate the backup, compression (using Zstandard), and retention management of multiple Docker Compose stacks. It ensures data consistency by stopping services before backup and restarting them immediately afterwards.
+A robust Python 3 script designed to safely archive Docker Compose application stacks, stop them during backup to ensure data consistency, and enforce a local retention policy. The script uses `tar` for archiving and sends a detailed ASCII-formatted summary via email.
+
+This script is ideal for use in a cron job environment (e.g., daily runs).
 
 ## ✨ Features
 
-* **Consistent Backups:** Stops Docker Compose stacks (`docker compose down`) before archiving to ensure data integrity and restarts them (`docker compose up -d`) afterwards.
-* **Efficient Compression:** Uses the highly efficient Zstandard (`.tar.zst`) compression algorithm for smaller file sizes and faster compression/decompression compared to standard Gzip.
-* **Comprehensive Logging:** Logs all steps, including start/stop actions, compression results, and cleanup to a dedicated log file (`/var/log/docker-backup.log`).
-* **Detailed Email Notifications:** Sends an email notification (SUCCESS or FAILURE) containing a summary of the new archives, local disk usage of the backup volume, and the full run log.
-* **Retention Management:** Automatically cleans up local backup archives older than a configurable number of days (default: 28 days).
-* **Detailed Disk Info:** Includes total storage, used storage, and percentage usage of the backup volume in the final summary.
+* **Consistency Assurance:** Safely stops and restarts Docker stacks using `docker compose down/up -d`.
+* **Archiving:** Creates uncompressed `.tar` archives of specified stack directories.
+* **Retention:** Enforces a local retention policy (default: 28 days).
+* **Detailed Email Reporting:** Sends a summary email containing:
+    * A list and total size of all new archives created.
+    * Disk usage statistics for the backup partition.
+    * A list of files deleted by the retention policy.
+* **Logging:** Appends all runtime steps and errors to a dedicated log file.
 
-## ⚙️ Prerequisites
+## ⚙️ Configuration
 
-Before running the script, ensure your system has the following installed:
+Before running the script, you must adjust the configuration parameters in the `--- CONFIGURATION ---` section.
 
-1.  **Python 3:** The script requires Python 3.6+ and standard libraries (`subprocess`, `os`, `sys`, `datetime`, `smtplib`, `email`).
-2.  **`docker` and `docker compose`:** Necessary for stopping and starting the stacks.
-3.  **`tar` with Zstandard Support:** The `tar` utility must support the `-I zstd` flag for Zstandard compression (common in modern Linux distributions).
-4.  **`df` and `du` utilities:** Used for disk space checks and summary reporting.
+| Parameter | Default Value | Description |
+| :--- | :--- | :--- |
+| `STACKS` | `["beszel", ...]` | **Required.** List of stack directory names located inside `BASE_DIR`. |
+| `BASE_DIR` | `/opt/stacks` | **Required.** The root directory containing most of your stacks. |
+| `EXTRA_STACK_PATH` | `/opt/dockge` | Optional. Full path to a single stack located outside of `BASE_DIR`. |
+| `BACKUP_DIR` | `/var/backups/docker` | **Required.** The target directory where archives will be stored. |
+| `DAILY_RETENTION_DAYS` | `28` | The number of days to keep local backups before deletion. |
+| `SMTP_SERVER`, `SMTP_PORT` | `mailjet.com`, `587` | Your SMTP server details for sending notifications. |
+| `SMTP_USER`, `SMTP_PASS` | `YOUR_API_KEY` | Your SMTP credentials. |
+| `SENDER_EMAIL`, `RECEIVER_EMAIL` | `sender@...`, `recipient@...` | Email addresses for reporting. |
+| `LOG_FILE` | `/var/log/docker-backup.log` | Path to the output log file. |
 
-## 🚀 Installation & Setup
+## 🚀 Usage
 
-### 1. Place the Script
+### 1. Setup
 
-Save the provided Python script (e.g., `docker-backup.py`) to a suitable location, like `/usr/local/bin/`.
+1.  Save the code as a Python script (e.g., `docker_backup.py`).
+2.  Make the script executable:
+    ```bash
+    chmod +x docker_backup.py
+    ```
+3.  Configure all parameters in the `--- CONFIGURATION ---` section.
+4.  Ensure that Python 3, `tar`, and `docker` are in your system's PATH.
+
+### 2. Execution
+
+Run the script manually:
 
 ```bash
-sudo mv docker-backup.py /usr/local/bin/
-sudo chmod +x /usr/local/bin/docker-backup.py
+/path/to/docker_backup.py
