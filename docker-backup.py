@@ -1,327 +1,297 @@
 #!/usr/bin/env python3
-
 import subprocess
 import os
 import sys
-import datetime
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from datetime import datetime
+from smtplib import SMTP_SSL
+from email.message import EmailMessage
 
-# --- CONFIGURATION ---
-# List of stacks located in BASE_DIR
-STACKS = ["stack1", "stack2", "stack3", "stack4", "stack5"]
-
-# Main data paths
+# --- CONFIGURATION (User-configurable parameters) ---
+STACKS = ["stack1", "stack2", "stack3", "stack4", "stack5"] 
 BASE_DIR = "/opt/stacks"
+EXTRA_STACK_PATH = "/opt/dockge" 
 BACKUP_DIR = "/var/backups/docker"
+DAILY_RETENTION_DAYS = 28
 
-# Special path for the external stack (e.g., Dockge, Portainer, etc.)
-EXTRA_STACK_PATH = "/opt/dockge"
-
-# Backup target paths (will be created automatically)
-EXTRA_STACK_BACKUP_TARGET = os.path.join(BACKUP_DIR, os.path.basename(EXTRA_STACK_PATH))
-STACKS_BACKUP_TARGET = os.path.join(BACKUP_DIR, "stacks")
-
-LOG_FILE = "/var/log/docker-backup.log"
-
-# Email Configuration (PLEASE REPLACE PLACEHOLDERS)
+# Email Configuration
 SMTP_SERVER = 'in-v3.mailjet.com'
 SMTP_PORT = 587
 SMTP_USER = 'YOUR_API_KEY'
 SMTP_PASS = 'YOUR_API_SECRET'
 SENDER_EMAIL = 'sender@your-domain.com'
 RECEIVER_EMAIL = 'recipient@email.com'
-
 SUBJECT_TAG = "[DOCKER-BACKUP]"
 
-DAILY_RETENTION_DAYS = 28 # Local retention period
+# Log file path
+LOG_FILE = "/var/log/docker-backup.log"
 
-# GLOBAL STATE VARIABLES
-GLOBAL_EXIT_CODE = 0
-ARCHIVE_PATHS = []
+# --- GLOBAL VARIABLES ---
 LOG_MESSAGES = []
-FILES_DELETED_COUNT = 0 
-# ----------------------
+BACKUP_SUCCESSFUL = True
+NEW_ARCHIVES = []
 
-def log_message(message, is_error=False):
-    """Writes a message to the log file and stores it in memory."""
-    timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-    log_line = f"[{timestamp}] {message}"
-    
-    if is_error:
-        global GLOBAL_EXIT_CODE
-        GLOBAL_EXIT_CODE = 1
-        log_line = f"❌ {log_line}"
-        
-    LOG_MESSAGES.append(log_line)
-    
-    with open(LOG_FILE, 'a') as f:
-        f.write(log_line + "\n")
+# --- HELPER FUNCTIONS ---
 
-def run_command(command, cwd=None, error_msg="Command failed"):
-    """Executes a shell command and logs the output."""
+def log(message, level="INFO"):
+    """Logs a message to the console and the global log list."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] [{level}] {message}"
+    print(log_entry)
+    LOG_MESSAGES.append(log_entry)
+    if level == "ERROR":
+        global BACKUP_SUCCESSFUL
+        BACKUP_SUCCESSFUL = False
+
+def run_command(command, description):
+    """Executes a shell command and logs the result."""
     try:
-        result = subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True, encoding='utf-8')
-        for line in result.stdout.strip().split('\n'):
-            if line:
-                log_message(f"stdout: {line}")
-        return True
+        log(f"Starting command: {description} ({' '.join(command)})")
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        log(f"Successfully finished: {description}")
+        return result.stdout.strip()
     except subprocess.CalledProcessError as e:
-        log_message(f"🛑 {error_msg} ({' '.join(command)}):", is_error=True)
-        log_message(f"stdout: {e.stdout.strip()}", is_error=True)
-        log_message(f"stderr: {e.stderr.strip()}", is_error=True)
-        return False
+        log(f"Failed: {description}. Error:\n{e.stderr.strip()}", "ERROR")
+        return None
     except FileNotFoundError:
-        log_message(f"🛑 Command not found: {command[0]}", is_error=True)
-        return False
+        log(f"Error: Command not found or not in PATH.", "ERROR")
+        return None
 
-def stop_stack(stack_path):
-    """Stops a Docker stack using docker compose down."""
-    stack_name = os.path.basename(stack_path)
-    log_message(f"--- 🛑 Stopping: {stack_name} ---")
-    
+def compose_action(stack_path, action="down"):
+    """Stops or starts a Docker Compose stack."""
     if not os.path.isdir(stack_path):
-        log_message(f"⚠️ ERROR: Directory {stack_path} does not exist. Skipping.", is_error=True)
-        return
-        
-    run_command(["docker", "compose", "down"], cwd=stack_path, 
-                error_msg=f"'docker compose down' for {stack_name} failed")
+        log(f"Stack directory not found at {stack_path}. Skipping {action}.", "WARNING")
+        return True
     
-def start_stack(stack_path):
-    """Starts a Docker stack using docker compose up -d."""
-    stack_name = os.path.basename(stack_path)
-    log_message(f"--- ▶️ Starting: {stack_name} ---")
+    action_text = "Stopping" if action == "down" else "Starting"
+    log(f"{action_text} stack in {stack_path}...")
     
-    if not os.path.isdir(stack_path):
-        log_message(f"⚠️ ERROR: Directory {stack_path} does not exist. Skipping.", is_error=True)
-        return
-        
-    run_command(["docker", "compose", "up", "-d"], cwd=stack_path, 
-                error_msg=f"'docker compose up -d' for {stack_name} failed")
-
-def compress_and_copy(source_path, target_dir):
-    """Compresses a folder and saves it with a timestamp using Zstandard."""
-    name = os.path.basename(source_path)
-    datetime_stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S') 
-    archive_name = f"{name}_{datetime_stamp}.tar.zst" 
-    target_file = os.path.join(target_dir, archive_name)
-
-    log_message(f"--- 📦 Backup: {name} (Source: {source_path}) ---")
-
-    # Use Zstandard compression
-    if run_command(["tar", "-c", "-I", "zstd", "-f", target_file, "-C", os.path.dirname(source_path), name],
-                   error_msg=f"Compression of {name} failed"):
-        log_message(f"✅ SUCCESS: {name} backed up to {target_file}")
-        ARCHIVE_PATHS.append(target_file)
-
-def cleanup_local():
-    """Deletes local archives older than DAILY_RETENTION_DAYS."""
-    global FILES_DELETED_COUNT 
-    FILES_DELETED_COUNT = 0 
+    compose_file = "compose.yaml" if os.path.exists(os.path.join(stack_path, "compose.yaml")) else "docker-compose.yml"
     
-    log_message(f"\n--- 4. LOCAL CLEANUP (Older than {DAILY_RETENTION_DAYS} days) ---")
-    
-    # Only search for Zstandard files
-    file_patterns = ["*.tar.zst"] 
-    
-    for target in [STACKS_BACKUP_TARGET, EXTRA_STACK_BACKUP_TARGET]:
-        log_message(f"  -> Cleaning up {target}:")
+    cmd = ["docker", "compose", "-f", os.path.join(stack_path, compose_file), action]
+    if action == "up":
+        cmd.append("-d") 
         
-        try:
-            total_deleted = 0
-            
-            for pattern in file_patterns:
-                # Find files older than X days
-                find_command = ["find", target, "-type", "f", "-name", pattern, "-mtime", f"+{DAILY_RETENTION_DAYS}", "-print0"]
-                
-                process = subprocess.Popen(find_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                
-                # Use xargs -r to prevent "rm: missing operand" when no files are found
-                delete_command = ["xargs", "-0", "-r", "rm", "-v"]
-                
-                delete_process = subprocess.run(delete_command, stdin=process.stdout, capture_output=True, text=True, encoding='utf-8')
-                
-                process.stdout.close()
-                
-                if process.wait() != 0 or delete_process.returncode != 0:
-                    if delete_process.stderr.strip():
-                        log_message(f"⚠️ WARNING: Cleanup with pattern {pattern} in {target} failed or had errors.", is_error=False)
-                        log_message(f"Stderr: {delete_process.stderr.strip()}", is_error=False)
-                    
-                deleted_list = delete_process.stdout.strip().split('\n')
-                
-                if deleted_list and deleted_list[0]:
-                    for deleted_file in deleted_list:
-                        log_message(f"Deleted: {deleted_file.split(' ', 1)[-1]}") 
-                    
-                    total_deleted += len(deleted_list)
-            
-            if total_deleted > 0:
-                FILES_DELETED_COUNT += total_deleted
-                log_message(f"  -> {total_deleted} old archives deleted in total.")
-            else:
-                # Log entry for when no files were deleted
-                log_message("  -> No old archives found.") 
+    result = run_command(cmd, f"{action_text} {os.path.basename(stack_path)}")
+    return result is not None
 
-        except Exception as e:
-            log_message(f"🛑 FATAL ERROR during cleanup: {e}", is_error=True)
+def create_archive(stack_name, base_dir, stack_path):
+    """Creates an UNCOMPRESSED TAR archive."""
+    global NEW_ARCHIVES
+    
+    TARGET_EXT = "tar"
+    TAR_COMMAND = "tar -c -f" 
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if stack_path == EXTRA_STACK_PATH:
+        archive_name = os.path.basename(stack_path)
+        archive_root_dir = os.path.dirname(stack_path)
+    else:
+        archive_name = stack_name
+        archive_root_dir = base_dir
 
-def get_disk_space_info():
-    """Retrieves human-readable disk usage (Total, Used, Percentage) for the backup directory."""
-    try:
-        # Use df -h to get human-readable disk usage
-        df_command = ["df", "-h", BACKUP_DIR]
-        result = subprocess.run(df_command, check=True, capture_output=True, text=True, encoding='utf-8')
-        
-        data_line = result.stdout.strip().split('\n')[-1]
-        columns = data_line.split()
-        
-        # Columns: Filesystem, Size, Used, Avail, Use%, Mounted on
-        if len(columns) >= 6:
-            size = columns[1]
-            used = columns[2]
-            percent = columns[4]
-            mount_point = columns[5]
-            
-            return f"Disk: {mount_point} | Total: {size} | Used: {used} | Usage: {percent}"
+    target_filename = os.path.join(BACKUP_DIR, f"{archive_name}_{timestamp}.{TARGET_EXT}")
+    
+    log(f"Creating uncompressed archive for '{archive_name}' at {target_filename}...")
+    
+    cmd = f"{TAR_COMMAND} {target_filename} -C {archive_root_dir} {archive_name}"
+    
+    command_list = cmd.split()
+    
+    if "-C" in command_list:
+        c_index = command_list.index("-C")
+        if c_index + 1 < len(command_list):
+            result = run_command(command_list, f"Archiving {archive_name}")
         else:
-            return "Could not parse comprehensive disk space information."
-
-    except Exception as e:
-        return f"ERROR retrieving disk space: {e}"
-
-def create_summary():
-    """Creates a formatted, alphabetized summary of the new archives, including disk space info."""
+            log(f"Internal Error: -C flag not followed by a directory.", "ERROR")
+            return False
+    else:
+        result = run_command(command_list, f"Archiving {archive_name}")
     
-    summary_lines = ["\nSUMMARY OF CREATED ARCHIVES (Alphabetical by filename):", 
-                     "--------------------------------------------------------------------", 
-                     "SIZE\tFILENAME", 
-                     "--------------------------------------------------------------------"]
+    if result is not None:
+        NEW_ARCHIVES.append(os.path.basename(target_filename))
+    return result is not None
+
+
+def cleanup_local_backups():
+    """Deletes old local archives based on retention days."""
+    TARGET_EXT = "tar"
     
+    log(f"Starting local backup cleanup: deleting files older than {DAILY_RETENTION_DAYS} days.")
+    
+    find_cmd = [
+        "find", BACKUP_DIR, 
+        "-type", "f", 
+        "-name", f"*.{TARGET_EXT}", 
+        "-mtime", f"+{DAILY_RETENTION_DAYS}", 
+        "-print0" 
+    ]
+
     try:
-        if ARCHIVE_PATHS:
-            # Get human-readable size for all new archives
-            du_command = ["du", "-h"] + ARCHIVE_PATHS
-            result = subprocess.run(du_command, check=True, capture_output=True, text=True, encoding='utf-8')
-            
-            du_output_lines = result.stdout.strip().split('\n')
-            sorted_lines = sorted(du_output_lines, key=lambda line: line.split('\t')[-1])
-
-            summary_lines.extend(sorted_lines)
-        else:
-            summary_lines.append("No new archives were created.")
-
-    except Exception as e:
-        summary_lines.append(f"ERROR creating archive summary: {e}")
+        find_result = subprocess.run(find_cmd, capture_output=True, text=True, check=True)
+        files_to_delete = find_result.stdout.strip().split('\0')
         
-    summary_lines.append("--------------------------------------------------------------------\n")
+        deleted_count = 0
+        for file_path in files_to_delete:
+            if file_path:
+                try:
+                    os.remove(file_path)
+                    log(f"Deleted old backup: {file_path}")
+                    deleted_count += 1
+                except OSError as e:
+                    log(f"Error deleting file {file_path}: {e}", "ERROR")
+
+        log(f"Local cleanup finished. Total files deleted: {deleted_count}")
     
-    # --- ADD DISK SPACE INFORMATION ---
-    disk_info = get_disk_space_info()
-    summary_lines.append(f"DISK USAGE CHECK (on {BACKUP_DIR}):")
-    summary_lines.append(disk_info)
-    summary_lines.append("--------------------------------------------------------------------\n")
+    except subprocess.CalledProcessError as e:
+        log(f"Error during find command execution: {e.stderr.strip()}", "ERROR")
+    except Exception as e:
+        log(f"An unexpected error occurred during cleanup: {e}", "ERROR")
 
-    return "\n".join(summary_lines)
 
-def send_email_notification(subject_raw, body):
-    """Sends an email notification with the full log content."""
+def get_disk_usage():
+    """Gets disk usage information for the BACKUP_DIR mount point."""
+    try:
+        df_result = run_command(["df", "-h", "--output=size,used,avail,pcent,target", BACKUP_DIR], "Checking disk usage")
+        if df_result:
+            lines = df_result.split('\n')
+            if len(lines) > 1:
+                data = lines[1].split()
+                if len(data) >= 5:
+                    return {
+                        "total": data[0], 
+                        "used": data[1], 
+                        "free": data[2], 
+                        "percent": data[3],
+                        "mount": data[4]
+                    }
+        log("Could not parse disk usage data.", "WARNING")
+        return None
+    except Exception as e:
+        log(f"Error getting disk usage: {e}", "ERROR")
+        return None
+
+def send_email_notification(disk_info):
+    """Sends a summary email notification."""
+    
+    status = "SUCCESS" if BACKUP_SUCCESSFUL else "FAILURE"
     
     try:
         hostname = subprocess.check_output(['hostname']).decode('utf-8').strip()
     except:
         hostname = "UNKNOWN_HOST"
         
-    final_subject = f"{SUBJECT_TAG} {subject_raw} on {hostname}"
+    current_date = datetime.now().strftime('%Y-%m-%d')
+    subject = f"{SUBJECT_TAG} {status}: Docker Backup completed on {hostname} ({current_date})"
+    
+    archive_list = "\n".join([f"- {a}" for a in NEW_ARCHIVES]) if NEW_ARCHIVES else "- No new archives created."
 
+    disk_body = ""
+    if disk_info:
+        disk_body = f"""
+        --- Disk Usage ({disk_info['mount']}) ---
+        Total: {disk_info['total']}
+        Used: {disk_info['used']} ({disk_info['percent']})
+        Free: {disk_info['free']}
+        """
+    else:
+        disk_body = "Disk usage information not available."
+
+    log_body = "\n".join(LOG_MESSAGES)
+    
+    email_content = f"""
+    Docker Stacks Backup Script Report ({status})
+
+    --- New Archives (Uncompressed .tar) ---
+    {archive_list}
+    
+    --- Retention Policy ---
+    Files older than {DAILY_RETENTION_DAYS} days were deleted.
+
+    {disk_body}
+
+    --- Full Log ---
+    {log_body}
+    """
+    
+    msg = EmailMessage()
+    msg['Subject'] = subject
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = RECEIVER_EMAIL
+    msg.set_content(email_content)
+    
     try:
-        msg = MIMEMultipart()
-        msg['Subject'] = final_subject
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = RECEIVER_EMAIL
-        
-        # Attach the body (summary) and the full log of the run
-        full_body = body + "\n\n" + ("\n".join(LOG_MESSAGES))
-        msg.attach(MIMEText(full_body, 'plain'))
-        
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
+        log("Sending email notification...")
+        with SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
             server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SENDER_EMAIL, RECEIVER_EMAIL, msg.as_string())
-            
-        log_message("✅ Email sent successfully.")
-        return True
-        
+            server.send_message(msg)
+        log("Email sent successfully.", "INFO")
     except Exception as e:
-        log_message(f"🛑 ERROR sending email: {e}", is_error=True)
-        return False
+        log(f"Failed to send email: {e}", "ERROR")
 
+# --- MAIN EXECUTION ---
 
 def main():
-    """Main logic of the backup script."""
+    current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    initial_log_header = (
+        "\n" + "="*50 + 
+        f"\n--- DOCKER BACKUP SCRIPT START ---\nDate and Time: {current_time_str}\n" + 
+        "="*50
+    )
+    LOG_MESSAGES.append(initial_log_header)
+
+    log("Phase 0: Initializing directories.")
     
-    # 0. Initialization
-    if not os.path.exists(os.path.dirname(LOG_FILE)):
-        os.makedirs(os.path.dirname(LOG_FILE))
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     
-    with open(LOG_FILE, 'a') as f:
-        f.write("\n" + "="*50 + "\n")
-        f.write("--- DOCKER STACK BACKUP PROCESS START ---\n")
-        f.write(f"Date and Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("="*50 + "\n")
+    # 1. STOP CONTAINERS
+    log("Phase 1: Stopping all Docker Compose stacks.")
+    
+    all_stacks = [os.path.join(BASE_DIR, s) for s in STACKS]
+    if EXTRA_STACK_PATH:
+        all_stacks.append(EXTRA_STACK_PATH)
         
-    # Ensure backup target directories exist
-    for d in [EXTRA_STACK_BACKUP_TARGET, STACKS_BACKUP_TARGET]:
-        os.makedirs(d, exist_ok=True)
-        
-    # --- 1. STOPPING ---
-    log_message("\n--- 1. STOP ALL STACKS ---")
-    for stack in STACKS:
-        stop_stack(os.path.join(BASE_DIR, stack))
-    stop_stack(EXTRA_STACK_PATH)
-
-    # --- 2. BACKUP ---
-    log_message("\n--- 2. BACKUP DATA ---")
-    for stack in STACKS:
-        compress_and_copy(os.path.join(BASE_DIR, stack), STACKS_BACKUP_TARGET)
-    compress_and_copy(EXTRA_STACK_PATH, EXTRA_STACK_BACKUP_TARGET)
-
-    # --- 3. STARTING ---
-    log_message("\n--- 3. START ALL STACKS ---")
-    start_stack(EXTRA_STACK_PATH)
-    for stack in STACKS:
-        start_stack(os.path.join(BASE_DIR, stack))
-
-    # --- 4. LOCAL CLEANUP ---
-    cleanup_local()
-
-    # --- 5. FINALIZATION & NOTIFICATION ---
-    summary = create_summary()
-    log_message(summary)
+    successfully_stopped_stacks = []
     
-    if GLOBAL_EXIT_CODE == 0:
-        mail_subject = "SUCCESS: Docker Backup completed successfully" 
-        mail_body = f"The daily Docker backup process finished successfully.\n\n{summary}"
-    else:
-        mail_subject = "FAILURE: Docker Backup finished with errors"
-        mail_body = "ATTENTION: The daily Docker backup process finished with errors.\n\n"
-        mail_body += "Please check the full log in this email for details."
+    for stack_path in all_stacks:
+        if compose_action(stack_path, action="down"):
+            successfully_stopped_stacks.append(stack_path)
+    
+    # 2. CREATE BACKUPS (Uncompressed .tar)
+    log("Phase 2: Creating uncompressed TAR archives.")
+    
+    for stack_name in STACKS:
+        create_archive(stack_name, BASE_DIR, os.path.join(BASE_DIR, stack_name))
 
-    send_email_notification(mail_subject, mail_body)
+    if EXTRA_STACK_PATH:
+        create_archive(os.path.basename(EXTRA_STACK_PATH), os.path.dirname(EXTRA_STACK_PATH), EXTRA_STACK_PATH)
 
-    # --- 6. FINAL MESSAGE ---
-    log_message("="*50)
-    if GLOBAL_EXIT_CODE == 0:
-        log_message("🎉 PROCESS COMPLETED: All steps executed successfully.")
-        log_message("Exit Code: 0")
-    else:
-        log_message("❌ PROCESS COMPLETED WITH ERRORS.")
-        log_message("Exit Code: 1")
-    log_message("="*50)
+    # 3. START CONTAINERS
+    log("Phase 3: Starting all successfully stopped Docker Compose stacks.")
+    
+    for stack_path in successfully_stopped_stacks:
+        compose_action(stack_path, action="up")
 
-    sys.exit(GLOBAL_EXIT_CODE)
+    # 4. LOCAL CLEANUP
+    log("Phase 4: Running local retention cleanup.")
+    cleanup_local_backups()
 
+    # 5. FINALIZATION AND NOTIFICATION
+    disk_info = get_disk_usage()
+    send_email_notification(disk_info)
+
+    log("--- DOCKER BACKUP SCRIPT END ---")
+    
+    try:
+        with open(LOG_FILE, 'a') as f:
+            f.write('\n'.join(LOG_MESSAGES) + "\n\n")
+    except Exception as e:
+        print(f"FATAL: Could not write final log to file: {e}", file=sys.stderr)
+
+    if not BACKUP_SUCCESSFUL:
+        sys.exit(1)
+    
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
