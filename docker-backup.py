@@ -7,7 +7,7 @@
 # Description: Safely archives Docker Compose stacks (stop/tar/start),
 #              enforces local retention, and sends detailed ASCII email reports.
 # Author:      gimpfenlord (https://github.com/gimpfenlord)
-# Version:     1.2.1 
+# Version:     1.2.2 
 # Created:     2025-12-15
 # License:     MIT
 # ==============================================================================
@@ -50,6 +50,20 @@ DELETED_FILES = []
 DELETED_SIZE_BYTES = 0 
 
 # --- HELPER FUNCTIONS ---
+
+def format_bytes(size_bytes):
+    """Converts bytes to human-readable format (like du -h)."""
+    if size_bytes == 0:
+        return "0B"
+    size_name = ("B", "K", "M", "G", "T", "P", "E", "Z", "Y")
+    i = 0
+    while size_bytes >= 1024 and i < len(size_name) - 1:
+        size_bytes /= 1024.
+        i += 1
+    if i == 0:
+        return f"{int(size_bytes)}{size_name[i]}"
+    return f"{size_bytes:.1f}{size_name[i]}"
+
 
 def log(message, level="INFO"):
     """Logs a message to the console and the global log list."""
@@ -132,18 +146,24 @@ def create_archive(stack_name, base_dir, stack_path):
         result = run_command(command_list, f"Archiving {archive_name}")
     
     if result is not None:
-        # Get file size in bytes
+        # Get file size in bytes and format for logging
         size_bytes = 0
         size_human = "N/A" 
         try:
             size_bytes = os.path.getsize(target_filename)
+            size_human = format_bytes(size_bytes)
         except Exception:
             pass
         
-        # Store the full path and both size formats
+        # Log the success and size of the created archive
+        log(f"Archive created successfully for {stack_name}. Size: {size_human} ({size_bytes} bytes).")
+        
+        # Store for email summary
         relative_path = os.path.relpath(target_filename, "/") 
         NEW_ARCHIVES.append(('/' + relative_path, size_human, size_bytes))
-    return result is not None
+        return True 
+    
+    return False 
 
 
 def cleanup_local_backups():
@@ -234,20 +254,6 @@ def get_disk_usage():
         log(f"An unexpected error occurred during du size check: {e}", "ERROR")
     
     return disk_info, backup_content_size
-
-
-def format_bytes(size_bytes):
-    """Converts bytes to human-readable format (like du -h)."""
-    if size_bytes == 0:
-        return "0B"
-    size_name = ("B", "K", "M", "G", "T", "P", "E", "Z", "Y")
-    i = 0
-    while size_bytes >= 1024 and i < len(size_name) - 1:
-        size_bytes /= 1024.
-        i += 1
-    if i == 0:
-        return f"{int(size_bytes)}{size_name[i]}"
-    return f"{size_bytes:.1f}{size_name[i]}"
 
 
 def send_email_notification(disk_info, backup_content_size):
@@ -384,7 +390,7 @@ def send_email_notification(disk_info, backup_content_size):
 
 def main():
     current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    # Behält Newlines zur korrekten Header-Formatierung
+    # Use newlines for correct log file header formatting
     initial_log_header = (
         "\n" + "="*50 + 
         f"\n--- DOCKER BACKUP SCRIPT START ---\nDate and Time: {current_time_str}\n" + 
@@ -392,11 +398,11 @@ def main():
     )
     LOG_MESSAGES.append(initial_log_header)
 
-    log("Phase 0: Initializing directories.")
+    log("### Phase 0: Initializing directories ###")
     
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
-    # Prepare list of stacks to process sequentially: (name, base_dir, path)
+    # Prepare list of stacks to process sequentially
     stacks_to_process = []
     for stack_name in STACKS:
         stack_path = os.path.join(BASE_DIR, stack_name)
@@ -414,8 +420,8 @@ def main():
             "path": EXTRA_STACK_PATH
         })
 
-    # 1. PROCESS STACKS SEQUENTIELL (Stop -> Archive -> Start)
-    log("Phase 1: Processing stacks sequentially (Stop -> Archive -> Start).")
+    # 1. PROCESS STACKS SEQUENTIALLY (Stop -> Archive -> Start)
+    log("### Phase 1: Processing stacks sequentially (Stop -> Archive -> Start) ###")
     
     for stack_info in stacks_to_process:
         stack_name = stack_info["name"]
@@ -428,7 +434,8 @@ def main():
         if compose_action(stack_path, action="down"):
             # 1.2 ARCHIVE
             if create_archive(stack_name, stack_base_dir, stack_path):
-                log(f"Archive created successfully for {stack_name}.")
+                # Size logging is handled inside create_archive
+                pass 
             else:
                 log(f"Archiving failed for {stack_name}. Attempting to restart.", "ERROR")
             
@@ -438,18 +445,18 @@ def main():
             log(f"Skipping archive and start for {stack_name} due to failure or directory issue.", "WARNING")
 
     # 2. LOCAL CLEANUP
-    log("Phase 2: Running local retention cleanup.")
+    log("### Phase 2: Running local retention cleanup ###")
     cleanup_local_backups()
 
     # 3. FINALIZATION AND NOTIFICATION
-    log("Phase 3: Finalizing report and sending notification.")
+    log("### Phase 3: Finalizing report and sending notification ###")
     disk_info, backup_content_size = get_disk_usage()
     send_email_notification(disk_info, backup_content_size)
 
     log("--- DOCKER BACKUP SCRIPT END ---")
     
     try:
-        # Behält Newlines für die Trennung der Log-Dateien
+        # Use newlines to separate log entries in the file
         with open(LOG_FILE, 'a') as f:
             f.write('\n'.join(LOG_MESSAGES) + "\n\n")
     except Exception as e:
