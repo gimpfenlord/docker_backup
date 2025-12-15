@@ -7,7 +7,7 @@
 # Description: Safely archives Docker Compose stacks (stop/tar/start),
 #              enforces local retention, and sends detailed ASCII email reports.
 # Author:      gimpfenlord (https://github.com/gimpfenlord)
-# Version:     1.2.0 
+# Version:     1.2.1 
 # Created:     2025-12-15
 # License:     MIT
 # ==============================================================================
@@ -45,9 +45,9 @@ LOG_FILE = "/var/log/docker-backup.log"
 # --- GLOBAL VARIABLES ---
 LOG_MESSAGES = []
 BACKUP_SUCCESSFUL = True
-NEW_ARCHIVES = [] # List of tuples: [(full_path, size_human_readable, size_bytes), ...]
-DELETED_FILES = [] # List of filenames deleted by retention
-DELETED_SIZE_BYTES = 0 # Total size of all files deleted by retention
+NEW_ARCHIVES = [] 
+DELETED_FILES = [] 
+DELETED_SIZE_BYTES = 0 
 
 # --- HELPER FUNCTIONS ---
 
@@ -117,7 +117,6 @@ def create_archive(stack_name, base_dir, stack_path):
     
     log(f"Creating uncompressed archive for '{archive_name}' at {target_filename}...")
     
-    # tar -c -f [target_filename] -C [archive_root_dir] [archive_name]
     cmd = f"{TAR_COMMAND} {target_filename} -C {archive_root_dir} {archive_name}"
     
     command_list = cmd.split()
@@ -385,6 +384,7 @@ def send_email_notification(disk_info, backup_content_size):
 
 def main():
     current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Behält Newlines zur korrekten Header-Formatierung
     initial_log_header = (
         "\n" + "="*50 + 
         f"\n--- DOCKER BACKUP SCRIPT START ---\nDate and Time: {current_time_str}\n" + 
@@ -414,7 +414,7 @@ def main():
             "path": EXTRA_STACK_PATH
         })
 
-    # 1. PROCESS STACKS SEQUENTIALLY (Stop -> Archive -> Start)
+    # 1. PROCESS STACKS SEQUENTIELL (Stop -> Archive -> Start)
     log("Phase 1: Processing stacks sequentially (Stop -> Archive -> Start).")
     
     for stack_info in stacks_to_process:
@@ -422,7 +422,7 @@ def main():
         stack_base_dir = stack_info["base_dir"]
         stack_path = stack_info["path"]
         
-        log(f"\n--- Starting backup for stack: {stack_name} ---")
+        log(f"--- Starting backup for stack: {stack_name} ---")
         
         # 1.1 STOP
         if compose_action(stack_path, action="down"):
@@ -438,17 +438,18 @@ def main():
             log(f"Skipping archive and start for {stack_name} due to failure or directory issue.", "WARNING")
 
     # 2. LOCAL CLEANUP
-    log("\nPhase 2: Running local retention cleanup.")
+    log("Phase 2: Running local retention cleanup.")
     cleanup_local_backups()
 
     # 3. FINALIZATION AND NOTIFICATION
-    log("\nPhase 3: Finalizing report and sending notification.")
+    log("Phase 3: Finalizing report and sending notification.")
     disk_info, backup_content_size = get_disk_usage()
     send_email_notification(disk_info, backup_content_size)
 
     log("--- DOCKER BACKUP SCRIPT END ---")
     
     try:
+        # Behält Newlines für die Trennung der Log-Dateien
         with open(LOG_FILE, 'a') as f:
             f.write('\n'.join(LOG_MESSAGES) + "\n\n")
     except Exception as e:
