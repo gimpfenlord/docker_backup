@@ -1,51 +1,51 @@
 # Docker Stack Backup Script
 
-A robust Python 3 script designed to safely archive Docker Compose application stacks, stop them during backup to ensure data consistency, and enforce a local retention policy. The script uses `tar` for archiving and sends a detailed ASCII-formatted summary via email.
+## Description
 
-This script is ideal for use in a cron job environment (e.g., daily runs).
+This Python script automates the backup process for multiple Docker Compose stacks. It is designed to execute a **stop-archive-start cycle** for each stack to ensure data consistency while minimizing downtime. Archives are saved as **uncompressed `.tar` files** to enhance efficiency and reduce restoration time.
 
-## ✨ Features
+Upon successful completion, the script performs local data cleanup (`Retention`) and sends a detailed ASCII email report containing all relevant information, including the total space freed during cleanup.
 
-* **Consistency Assurance:** Safely stops and restarts Docker stacks using `docker compose down/up -d`.
-* **Archiving:** Creates uncompressed `.tar` archives of specified stack directories.
-* **Retention:** Enforces a local retention policy (default: 28 days).
-* **Detailed Email Reporting:** Sends a summary email containing:
-    * A list and total size of all new archives created.
-    * Disk usage statistics for the backup partition.
-    * A list of files deleted by the retention policy.
-* **Logging:** Appends all runtime steps and errors to a dedicated log file.
+## Features
 
-## ⚙️ Configuration
+* **Zero-Downtime Strategy:** Stops and starts each stack individually to maximize overall availability.
+* **Uncompressed Archives:** Creates `.tar` archives without additional compression to speed up the process and minimize restoration time.
+* **Local Retention:** Automatically deletes backups older than the configured value (default 28 days) and calculates the total disk space freed.
+* **Detailed Reporting:** Sends a comprehensive email report that includes the status, a list of newly created archives (incl. size), the total space freed, and the current storage usage of the backup volume.
 
-Before running the script, you must adjust the configuration parameters in the `--- CONFIGURATION ---` section.
+## Configuration
 
-| Parameter | Default Value | Description |
+Adjust the following variables within the script (`docker-backup.py`) to match your environment:
+
+### Paths and Stacks
+| Variable | Description | Default Value |
 | :--- | :--- | :--- |
-| `STACKS` | `["beszel", ...]` | **Required.** List of stack directory names located inside `BASE_DIR`. |
-| `BASE_DIR` | `/opt/stacks` | **Required.** The root directory containing most of your stacks. |
-| `EXTRA_STACK_PATH` | `/opt/dockge` | Optional. Full path to a single stack located outside of `BASE_DIR`. |
-| `BACKUP_DIR` | `/var/backups/docker` | **Required.** The target directory where archives will be stored. |
-| `DAILY_RETENTION_DAYS` | `28` | The number of days to keep local backups before deletion. |
-| `SMTP_SERVER`, `SMTP_PORT` | `mailjet.com`, `587` | Your SMTP server details for sending notifications. |
-| `SMTP_USER`, `SMTP_PASS` | `YOUR_API_KEY` | Your SMTP credentials. |
-| `SENDER_EMAIL`, `RECEIVER_EMAIL` | `sender@...`, `recipient@...` | Email addresses for reporting. |
-| `LOG_FILE` | `/var/log/docker-backup.log` | Path to the output log file. |
+| `STACKS` | List of stack names located in the `BASE_DIR`. | `["beszel", ...]` |
+| `BASE_DIR` | Base directory containing your Docker Compose stacks. | `/opt/stacks` |
+| `EXTRA_STACK_PATH` | Path to a stack located outside the `BASE_DIR` (optional). | `/opt/dockge` |
+| `BACKUP_DIR` | Destination directory for the backup archives. | `/var/backups/docker` |
+| `DAILY_RETENTION_DAYS` | Number of days to keep local backups before deletion. | `28` |
+| `LOG_FILE` | Path to the output log file. | `/var/log/docker-backup.log` |
 
-## 🚀 Usage
+### Email Notification
+Configure your SMTP settings to receive reports.
 
-### 1. Setup
+| Variable | Description |
+| :--- | :--- |
+| `SMTP_SERVER` / `SMTP_PORT` | SMTP server address and port. |
+| `SMTP_USER` / `SMTP_PASS` | Credentials for the SMTP server. |
+| `SENDER_EMAIL` / `RECEIVER_EMAIL` | Sender and recipient email addresses. |
+| `SUBJECT_TAG` | Prefix for the email subject line. |
 
-1.  Save the code as a Python script (e.g., `docker_backup.py`).
-2.  Make the script executable:
+## Usage
+
+1.  **Permissions:** Ensure the script is executable and has the necessary permissions to access Docker, the stacks, and the backup directory.
     ```bash
-    chmod +x docker_backup.py
+    chmod +x docker-backup.py
     ```
-3.  Configure all parameters in the `--- CONFIGURATION ---` section.
-4.  Ensure that Python 3, `tar`, and `docker` are in your system's PATH.
 
-### 2. Execution
-
-Run the script manually:
-
-```bash
-/path/to/docker_backup.py
+2.  **Set up Cron Job:** Schedule the script to run daily (or as needed) using a cron job.
+    ```bash
+    # Example: Run daily at 02:00 AM
+    0 2 * * * /usr/bin/env python3 /path/to/your/docker-backup.py
+    ```
