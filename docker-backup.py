@@ -7,7 +7,7 @@
 # Description: Safely archives Docker Compose stacks (stop/tar/start),
 #              enforces local retention, and sends detailed ASCII email reports.
 # Author:      gimpfenlord (https://github.com/gimpfenlord)
-# Version:     1.1.0
+# Version:     1.2.0 
 # Created:     2025-12-15
 # License:     MIT
 # ==============================================================================
@@ -30,14 +30,14 @@ BACKUP_DIR = "/var/backups/docker"
 DAILY_RETENTION_DAYS = 28
 
 # Email Configuration
-SMTP_SERVER = 'your-mailserver.com'
+SMTP_SERVER = 'mailserver'
 SMTP_PORT = 587
 SMTP_USER = 'username'
 SMTP_PASS = 'password'
 SENDER_EMAIL = 'sender@your-domain.com'
 RECEIVER_EMAIL = 'recipient@email.com'
 
-SUBJECT_TAG = "[DOCKER-BACKUP]"
+SUBJECT_TAG = "[TAG]"
 
 # Log file path
 LOG_FILE = "/var/log/docker-backup.log"
@@ -102,6 +102,7 @@ def create_archive(stack_name, base_dir, stack_path):
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
+    # Determine the actual root directory and the name to archive
     if stack_path == EXTRA_STACK_PATH:
         archive_name = os.path.basename(stack_path)
         archive_root_dir = os.path.dirname(stack_path)
@@ -116,6 +117,7 @@ def create_archive(stack_name, base_dir, stack_path):
     
     log(f"Creating uncompressed archive for '{archive_name}' at {target_filename}...")
     
+    # tar -c -f [target_filename] -C [archive_root_dir] [archive_name]
     cmd = f"{TAR_COMMAND} {target_filename} -C {archive_root_dir} {archive_name}"
     
     command_list = cmd.split()
@@ -166,7 +168,7 @@ def cleanup_local_backups():
         files_to_delete = find_result.stdout.strip().split('\0')
         
         deleted_count = 0
-        DELETED_SIZE_BYTES = 0 # Reset counter
+        DELETED_SIZE_BYTES = 0 
         for file_path in files_to_delete:
             if file_path:
                 try:
@@ -393,40 +395,54 @@ def main():
     log("Phase 0: Initializing directories.")
     
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    
-    # 1. STOP CONTAINERS
-    log("Phase 1: Stopping all Docker Compose stacks.")
-    
-    all_stacks = [os.path.join(BASE_DIR, s) for s in STACKS]
-    if EXTRA_STACK_PATH:
-        all_stacks.append(EXTRA_STACK_PATH)
-        
-    successfully_stopped_stacks = []
-    
-    for stack_path in all_stacks:
-        if compose_action(stack_path, action="down"):
-            successfully_stopped_stacks.append(stack_path)
-    
-    # 2. CREATE BACKUPS (Uncompressed .tar)
-    log("Phase 2: Creating uncompressed TAR archives.")
-    
+
+    # Prepare list of stacks to process sequentially: (name, base_dir, path)
+    stacks_to_process = []
     for stack_name in STACKS:
-        create_archive(stack_name, BASE_DIR, os.path.join(BASE_DIR, stack_name))
+        stack_path = os.path.join(BASE_DIR, stack_name)
+        stacks_to_process.append({
+            "name": stack_name, 
+            "base_dir": BASE_DIR, 
+            "path": stack_path
+        })
 
+    # Add extra stack if configured
     if EXTRA_STACK_PATH:
-        create_archive(os.path.basename(EXTRA_STACK_PATH), os.path.dirname(EXTRA_STACK_PATH), EXTRA_STACK_PATH)
+        stacks_to_process.append({
+            "name": os.path.basename(EXTRA_STACK_PATH),
+            "base_dir": os.path.dirname(EXTRA_STACK_PATH),
+            "path": EXTRA_STACK_PATH
+        })
 
-    # 3. START CONTAINERS
-    log("Phase 3: Starting all successfully stopped Docker Compose stacks.")
+    # 1. PROCESS STACKS SEQUENTIALLY (Stop -> Archive -> Start)
+    log("Phase 1: Processing stacks sequentially (Stop -> Archive -> Start).")
     
-    for stack_path in successfully_stopped_stacks:
-        compose_action(stack_path, action="up")
+    for stack_info in stacks_to_process:
+        stack_name = stack_info["name"]
+        stack_base_dir = stack_info["base_dir"]
+        stack_path = stack_info["path"]
+        
+        log(f"\n--- Starting backup for stack: {stack_name} ---")
+        
+        # 1.1 STOP
+        if compose_action(stack_path, action="down"):
+            # 1.2 ARCHIVE
+            if create_archive(stack_name, stack_base_dir, stack_path):
+                log(f"Archive created successfully for {stack_name}.")
+            else:
+                log(f"Archiving failed for {stack_name}. Attempting to restart.", "ERROR")
+            
+            # 1.3 START (Always attempt to restart if stop was successful)
+            compose_action(stack_path, action="up")
+        else:
+            log(f"Skipping archive and start for {stack_name} due to failure or directory issue.", "WARNING")
 
-    # 4. LOCAL CLEANUP
-    log("Phase 4: Running local retention cleanup.")
+    # 2. LOCAL CLEANUP
+    log("\nPhase 2: Running local retention cleanup.")
     cleanup_local_backups()
 
-    # 5. FINALIZATION AND NOTIFICATION
+    # 3. FINALIZATION AND NOTIFICATION
+    log("\nPhase 3: Finalizing report and sending notification.")
     disk_info, backup_content_size = get_disk_usage()
     send_email_notification(disk_info, backup_content_size)
 
